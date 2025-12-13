@@ -121,7 +121,7 @@ function App() {
                                 <div className={`w-3 h-3 rounded-full ${connectionState.whatsapp ? 'bg-green-500' : 'bg-yellow-500'}`} />
                                 <span className="text-sm text-gray-600">WhatsApp</span>
                                 <div className="w-px h-4 bg-gray-300 mx-2" />
-                                <div className={`w-3 h-3 rounded-full ${connectionState.signal ? 'bg-blue-500' : 'bg-yellow-500'}`} />
+                                <div className={`w-3 h-3 rounded-full ${connectionState.signal ? 'bg-green-500' : 'bg-yellow-500'}`} />
                                 <span className="text-sm text-gray-600">Signal</span>
                             </>
                         )}
