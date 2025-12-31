@@ -64,6 +64,7 @@ import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
 import { WhatsAppTracker } from './tracker.js';
 import * as readline from 'readline';
+import { createTelegrafReporterFromEnv } from './telegraf.js';
 
 if (debugMode) {
     originalConsoleLog('🔍 Debug mode enabled\n');
@@ -72,8 +73,76 @@ if (debugMode) {
     originalConsoleLog('💡 Tip: Use --debug or -d for detailed debug output\n');
 }
 
-let currentTargetJid: string | null = null;
-let currentTracker: WhatsAppTracker | null = null;
+const trackedTargetJids: Set<string> = new Set();
+const activeTrackers: Map<string, WhatsAppTracker> = new Map();
+const telegrafReporter = createTelegrafReporterFromEnv();
+const probeDelayOptions = parseProbeDelayOptions(process.argv);
+const initialTargets = parseTargetsFromArgs(process.argv);
+
+function parseProbeDelayOptions(args: string[]): { minProbeDelayMs?: number; maxProbeDelayMs?: number } | undefined {
+    const intervalArg = getArgValue(args, '--probe-interval-ms');
+    const minArg = getArgValue(args, '--probe-min-ms');
+    const maxArg = getArgValue(args, '--probe-max-ms');
+
+    let minProbeDelayMs: number | undefined;
+    let maxProbeDelayMs: number | undefined;
+
+    if (intervalArg !== undefined) {
+        const interval = parsePositiveNumber(intervalArg);
+        if (interval !== undefined) {
+            minProbeDelayMs = interval;
+            maxProbeDelayMs = interval;
+        } else {
+            originalConsoleLog('⚠️ Invalid --probe-interval-ms value, ignoring.');
+        }
+    }
+
+    if (minArg !== undefined) {
+        const minValue = parsePositiveNumber(minArg);
+        if (minValue !== undefined) {
+            minProbeDelayMs = minValue;
+        } else {
+            originalConsoleLog('⚠️ Invalid --probe-min-ms value, ignoring.');
+        }
+    }
+
+    if (maxArg !== undefined) {
+        const maxValue = parsePositiveNumber(maxArg);
+        if (maxValue !== undefined) {
+            maxProbeDelayMs = maxValue;
+        } else {
+            originalConsoleLog('⚠️ Invalid --probe-max-ms value, ignoring.');
+        }
+    }
+
+    if (minProbeDelayMs === undefined && maxProbeDelayMs === undefined) {
+        return undefined;
+    }
+
+    return { minProbeDelayMs, maxProbeDelayMs };
+}
+
+function getArgValue(args: string[], key: string): string | undefined {
+    const index = args.indexOf(key);
+    if (index === -1 || index === args.length - 1) return undefined;
+    return args[index + 1];
+}
+
+function parsePositiveNumber(value: string): number | undefined {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+    return Math.floor(parsed);
+}
+
+function parseTargetsFromArgs(args: string[]): string[] {
+    const targetsArg = getArgValue(args, '--targets');
+    if (!targetsArg) return [];
+
+    return targetsArg
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean);
+}
 
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
@@ -98,10 +167,10 @@ async function connectToWhatsApp() {
         if (connection === 'close') {
             isConnected = false;
             // Stop the tracker if it's running, as the socket is dead
-            if (currentTracker) {
-                currentTracker.stopTracking();
-                currentTracker = null;
+            for (const tracker of activeTrackers.values()) {
+                tracker.stopTracking();
             }
+            activeTrackers.clear();
 
             const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
             if (debugMode) {
@@ -114,12 +183,27 @@ async function connectToWhatsApp() {
             originalConsoleLog('✅ Connected to WhatsApp');
             isConnected = true;
 
-            if (currentTargetJid) {
+            if (trackedTargetJids.size > 0) {
                 if (debugMode) {
-                    originalConsoleLog(`Resuming tracking for ${currentTargetJid}...`);
+                    originalConsoleLog(`Resuming tracking for ${Array.from(trackedTargetJids).join(', ')}...`);
                 }
-                currentTracker = new WhatsAppTracker(sock, currentTargetJid, debugMode);
-                currentTracker.startTracking();
+                for (const jid of trackedTargetJids) {
+                    const tracker = new WhatsAppTracker(sock, jid, debugMode, probeDelayOptions);
+                    tracker.onUpdate = (updateData) => {
+                        telegrafReporter?.reportTrackerUpdate({
+                            contactId: jid,
+                            platform: 'whatsapp',
+                            ...updateData
+                        });
+                    };
+                    tracker.startTracking();
+                    activeTrackers.set(jid, tracker);
+                }
+            } else if (initialTargets.length > 0) {
+                const startedAny = await startTrackingForNumbers(initialTargets);
+                if (!startedAny && trackedTargetJids.size === 0) {
+                    askForTarget();
+                }
             } else {
                 askForTarget();
             }
@@ -132,24 +216,38 @@ async function connectToWhatsApp() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    const askForTarget = () => {
-        const rl = readline.createInterface({
-            input: process.stdin,
-            output: process.stdout
-        });
+    const startTrackingForNumbers = async (rawNumbers: string[]) => {
+        if (rawNumbers.length === 0) {
+            return false;
+        }
 
-        rl.question('Enter target phone number (with country code, e.g., 491701234567): ', async (number) => {
-            // Basic cleanup
-            const cleanNumber = number.replace(/\D/g, '');
+        const validTargets: string[] = [];
+        const invalidNumbers: string[] = [];
 
+        for (const raw of rawNumbers) {
+            const cleanNumber = raw.replace(/\D/g, '');
             if (cleanNumber.length < 10) {
-                originalConsoleLog('Invalid number format. Please try again.');
-                rl.close();
-                askForTarget();
-                return;
+                invalidNumbers.push(raw);
+                continue;
             }
+            validTargets.push(cleanNumber + '@s.whatsapp.net');
+        }
 
-            const targetJid = cleanNumber + '@s.whatsapp.net';
+        if (validTargets.length === 0) {
+            return false;
+        }
+
+        if (invalidNumbers.length > 0) {
+            originalConsoleLog(`⚠️ Skipping invalid entries: ${invalidNumbers.join(', ')}`);
+        }
+
+        let startedAny = false;
+
+        for (const targetJid of validTargets) {
+            if (trackedTargetJids.has(targetJid)) {
+                originalConsoleLog(`ℹ️ Already tracking ${targetJid}`);
+                continue;
+            }
 
             if (debugMode) {
                 originalConsoleLog(`Verifying ${targetJid}...`);
@@ -159,19 +257,44 @@ async function connectToWhatsApp() {
                 const result = results?.[0];
 
                 if (result?.exists) {
-                    currentTargetJid = result.jid;
-                    currentTracker = new WhatsAppTracker(sock, result.jid, debugMode);
-                    currentTracker.startTracking();
+                    trackedTargetJids.add(result.jid);
+                    const tracker = new WhatsAppTracker(sock, result.jid, debugMode, probeDelayOptions);
+                    tracker.onUpdate = (updateData) => {
+                        telegrafReporter?.reportTrackerUpdate({
+                            contactId: result.jid,
+                            platform: 'whatsapp',
+                            ...updateData
+                        });
+                    };
+                    tracker.startTracking();
+                    activeTrackers.set(result.jid, tracker);
+                    startedAny = true;
                     originalConsoleLog(`✅ Tracking started for ${result.jid}`);
-                    rl.close();
                 } else {
-                    originalConsoleLog('❌ Number not registered on WhatsApp.');
-                    rl.close();
-                    askForTarget();
+                    originalConsoleLog(`❌ Number not registered on WhatsApp: ${targetJid}`);
                 }
             } catch (err) {
-                console.error('Error verifying number:', err);
-                rl.close();
+                console.error(`Error verifying ${targetJid}:`, err);
+            }
+        }
+
+        return startedAny;
+    };
+
+    const askForTarget = () => {
+        const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+        });
+
+        rl.question('Enter target phone numbers (comma-separated, e.g., 491701234567, 491701234568): ', async (numberInput) => {
+            const rawNumbers = numberInput
+                .split(',')
+                .map((value) => value.trim())
+                .filter(Boolean);
+            const startedAny = await startTrackingForNumbers(rawNumbers);
+            rl.close();
+            if (!startedAny && trackedTargetJids.size === 0) {
                 askForTarget();
             }
         });
@@ -179,3 +302,13 @@ async function connectToWhatsApp() {
 }
 
 connectToWhatsApp();
+
+process.on('SIGINT', () => {
+    telegrafReporter?.close();
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    telegrafReporter?.close();
+    process.exit(0);
+});

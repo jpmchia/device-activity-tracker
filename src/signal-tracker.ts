@@ -68,6 +68,8 @@ export class SignalTracker {
     private deviceMetrics: Map<string, DeviceMetrics> = new Map();
     private globalRttHistory: number[] = [];
     private probeMethod: ProbeMethod = 'reaction';
+    private minProbeDelayMs: number = 1000;
+    private maxProbeDelayMs: number = 2000;
     private ws: WebSocket | null = null;
     private reconnectTimeout: NodeJS.Timeout | null = null;
     public onUpdate?: (data: any) => void;
@@ -97,6 +99,16 @@ export class SignalTracker {
 
     public getProbeMethod(): ProbeMethod {
         return this.probeMethod;
+    }
+
+    public setProbeDelayRange(minDelayMs?: number, maxDelayMs?: number) {
+        const defaultMin = 1000;
+        const defaultMax = 2000;
+        const resolvedMin = minDelayMs !== undefined ? Math.max(0, Math.floor(minDelayMs)) : defaultMin;
+        const resolvedMax = maxDelayMs !== undefined ? Math.max(0, Math.floor(maxDelayMs)) : defaultMax;
+
+        this.minProbeDelayMs = Math.min(resolvedMin, resolvedMax);
+        this.maxProbeDelayMs = Math.max(resolvedMin, resolvedMax);
     }
 
     /**
@@ -231,7 +243,8 @@ export class SignalTracker {
                 logger.debug('Error sending probe:', err);
             }
             // Small delay between probes
-            const delay = Math.floor(Math.random() * 1000) + 1000;
+            const delayRange = this.maxProbeDelayMs - this.minProbeDelayMs;
+            const delay = this.minProbeDelayMs + Math.floor(Math.random() * (delayRange + 1));
             await new Promise(resolve => setTimeout(resolve, delay));
         }
     }

@@ -16,6 +16,7 @@ import { pino } from 'pino';
 import { Boom } from '@hapi/boom';
 import { WhatsAppTracker, ProbeMethod } from './tracker.js';
 import { SignalTracker, getSignalAccounts, checkSignalNumber } from './signal-tracker.js';
+import { createTelegrafReporterFromEnv } from './telegraf.js';
 
 // Configuration
 const SIGNAL_API_URL = process.env.SIGNAL_API_URL || 'http://localhost:8080';
@@ -37,6 +38,8 @@ let isSignalConnected = false;
 let signalAccountNumber: string | null = null;
 let globalProbeMethod: ProbeMethod = 'delete'; // Default to delete method
 let currentWhatsAppQr: string | null = null; // Store current QR code for new clients
+let globalProbeDelay: { minMs?: number; maxMs?: number } = {};
+const telegrafReporter = createTelegrafReporterFromEnv();
 
 // Platform type for contacts
 type Platform = 'whatsapp' | 'signal';
@@ -47,6 +50,25 @@ interface TrackerEntry {
 }
 
 const trackers: Map<string, TrackerEntry> = new Map(); // JID/Number -> Tracker entry
+
+function applyProbeDelay(entry: TrackerEntry) {
+    if (globalProbeDelay.minMs === undefined && globalProbeDelay.maxMs === undefined) {
+        return;
+    }
+
+    if (entry.platform === 'whatsapp') {
+        (entry.tracker as WhatsAppTracker).setProbeDelayRange(globalProbeDelay.minMs, globalProbeDelay.maxMs);
+    } else {
+        (entry.tracker as SignalTracker).setProbeDelayRange(globalProbeDelay.minMs, globalProbeDelay.maxMs);
+    }
+}
+
+function parseDelayValue(value: any): number | undefined {
+    if (value === undefined || value === null || value === '') return undefined;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+    return Math.floor(parsed);
+}
 
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
@@ -252,6 +274,10 @@ io.on('connection', (socket) => {
 
     // Send current probe method to client
     socket.emit('probe-method', globalProbeMethod);
+    socket.emit('probe-delay', {
+        minMs: globalProbeDelay.minMs ?? null,
+        maxMs: globalProbeDelay.maxMs ?? null
+    });
 
     // Send tracked contacts with platform info
     const trackedContacts = Array.from(trackers.entries()).map(([id, entry]) => ({
@@ -311,10 +337,17 @@ io.on('connection', (socket) => {
                 const tracker = new SignalTracker(SIGNAL_API_URL, signalAccountNumber, targetNumber);
 
                 trackers.set(signalId, { tracker, platform: 'signal' });
+                applyProbeDelay(trackers.get(signalId)!);
 
                 tracker.onUpdate = (updateData) => {
                     io.emit('tracker-update', {
                         jid: signalId,
+                        platform: 'signal',
+                        ...updateData
+                    });
+
+                    telegrafReporter?.reportTrackerUpdate({
+                        contactId: signalId,
                         platform: 'signal',
                         ...updateData
                     });
@@ -350,10 +383,17 @@ io.on('connection', (socket) => {
                     const tracker = new WhatsAppTracker(sock, result.jid);
                     tracker.setProbeMethod(globalProbeMethod);
                     trackers.set(result.jid, { tracker, platform: 'whatsapp' });
+                    applyProbeDelay(trackers.get(result.jid)!);
 
                     tracker.onUpdate = (updateData) => {
                         io.emit('tracker-update', {
                             jid: result.jid,
+                            platform: 'whatsapp',
+                            ...updateData
+                        });
+
+                        telegrafReporter?.reportTrackerUpdate({
+                            contactId: result.jid,
                             platform: 'whatsapp',
                             ...updateData
                         });
@@ -421,9 +461,44 @@ io.on('connection', (socket) => {
         io.emit('probe-method', method);
         console.log(`Probe method changed to: ${method}`);
     });
+
+    socket.on('set-probe-delay', (data: { minMs?: number; maxMs?: number }) => {
+        const minMs = parseDelayValue(data?.minMs);
+        const maxMs = parseDelayValue(data?.maxMs);
+
+        if (minMs === undefined && maxMs === undefined) {
+            socket.emit('error', { message: 'Invalid probe delay values' });
+            return;
+        }
+
+        const resolvedMin = minMs === undefined ? maxMs : minMs;
+        const resolvedMax = maxMs === undefined ? minMs : maxMs;
+
+        globalProbeDelay = { minMs: resolvedMin, maxMs: resolvedMax };
+
+        for (const entry of trackers.values()) {
+            applyProbeDelay(entry);
+        }
+
+        io.emit('probe-delay', {
+            minMs: resolvedMin ?? null,
+            maxMs: resolvedMax ?? null
+        });
+        console.log(`Probe delay updated: min=${resolvedMin ?? 'default'} max=${resolvedMax ?? 'default'}`);
+    });
 });
 
 const PORT = 3001;
 httpServer.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+});
+
+process.on('SIGINT', () => {
+    telegrafReporter?.close();
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    telegrafReporter?.close();
+    process.exit(0);
 });

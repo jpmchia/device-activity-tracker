@@ -5,6 +5,10 @@ import { ContactCard } from './ContactCard';
 import { Login } from './Login';
 
 type ProbeMethod = 'delete' | 'reaction';
+interface ProbeDelayConfig {
+    minMs: number | null;
+    maxMs: number | null;
+}
 
 interface DashboardProps {
     connectionState: ConnectionState;
@@ -47,6 +51,8 @@ export function Dashboard({ connectionState }: DashboardProps) {
     const [error, setError] = useState<string | null>(null);
     const [privacyMode, setPrivacyMode] = useState(false);
     const [probeMethod, setProbeMethod] = useState<ProbeMethod>('delete');
+    const [probeDelayMin, setProbeDelayMin] = useState<string>('');
+    const [probeDelayMax, setProbeDelayMax] = useState<string>('');
     const [showConnections, setShowConnections] = useState(false);
 
     useEffect(() => {
@@ -150,6 +156,11 @@ export function Dashboard({ connectionState }: DashboardProps) {
             setProbeMethod(method);
         }
 
+        function onProbeDelay(config: ProbeDelayConfig) {
+            setProbeDelayMin(config.minMs === null ? '' : String(config.minMs));
+            setProbeDelayMax(config.maxMs === null ? '' : String(config.maxMs));
+        }
+
         function onTrackedContacts(contacts: { id: string, platform: Platform }[]) {
             setContacts(prev => {
                 const next = new Map(prev);
@@ -187,6 +198,7 @@ export function Dashboard({ connectionState }: DashboardProps) {
         socket.on('contact-removed', onContactRemoved);
         socket.on('error', onError);
         socket.on('probe-method', onProbeMethod);
+        socket.on('probe-delay', onProbeDelay);
         socket.on('tracked-contacts', onTrackedContacts);
 
         // Request tracked contacts after listeners are set up
@@ -200,6 +212,7 @@ export function Dashboard({ connectionState }: DashboardProps) {
             socket.off('contact-removed', onContactRemoved);
             socket.off('error', onError);
             socket.off('probe-method', onProbeMethod);
+            socket.off('probe-delay', onProbeDelay);
             socket.off('tracked-contacts', onTrackedContacts);
         };
     }, []);
@@ -215,6 +228,31 @@ export function Dashboard({ connectionState }: DashboardProps) {
 
     const handleProbeMethodChange = (method: ProbeMethod) => {
         socket.emit('set-probe-method', method);
+    };
+
+    const handleProbeDelayApply = () => {
+        const minValue = probeDelayMin.trim() === '' ? undefined : Number(probeDelayMin);
+        const maxValue = probeDelayMax.trim() === '' ? undefined : Number(probeDelayMax);
+
+        if (minValue !== undefined && (!Number.isFinite(minValue) || minValue < 0)) {
+            setError('Probe delay min must be a non-negative number.');
+            setTimeout(() => setError(null), 3000);
+            return;
+        }
+
+        if (maxValue !== undefined && (!Number.isFinite(maxValue) || maxValue < 0)) {
+            setError('Probe delay max must be a non-negative number.');
+            setTimeout(() => setError(null), 3000);
+            return;
+        }
+
+        if (minValue === undefined && maxValue === undefined) {
+            setError('Provide a min or max probe delay.');
+            setTimeout(() => setError(null), 3000);
+            return;
+        }
+
+        socket.emit('set-probe-delay', { minMs: minValue, maxMs: maxValue });
     };
 
     return (
@@ -238,6 +276,33 @@ export function Dashboard({ connectionState }: DashboardProps) {
                         </button>
                     </div>
                     <div className="flex items-center gap-4">
+                        {/* Probe Delay Controls */}
+                        <div className="flex items-center gap-2">
+                            <span className="text-sm text-gray-600">Probe Delay (ms):</span>
+                            <input
+                                type="number"
+                                min="0"
+                                placeholder="Min"
+                                className="w-24 px-2 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                                value={probeDelayMin}
+                                onChange={(e) => setProbeDelayMin(e.target.value)}
+                            />
+                            <input
+                                type="number"
+                                min="0"
+                                placeholder="Max"
+                                className="w-24 px-2 py-1.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                                value={probeDelayMax}
+                                onChange={(e) => setProbeDelayMax(e.target.value)}
+                            />
+                            <button
+                                onClick={handleProbeDelayApply}
+                                className="px-3 py-1.5 text-sm font-medium rounded-lg bg-gray-800 text-white hover:bg-gray-900 transition-colors"
+                                title="Apply probe delay to all trackers"
+                            >
+                                Apply
+                            </button>
+                        </div>
                         {/* Probe Method Toggle */}
                         <div className="flex items-center gap-2">
                             <span className="text-sm text-gray-600">Probe Method:</span>

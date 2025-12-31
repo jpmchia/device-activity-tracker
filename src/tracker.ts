@@ -104,13 +104,24 @@ export class WhatsAppTracker {
     private probeTimeouts: Map<string, NodeJS.Timeout> = new Map();
     private lastPresence: string | null = null;
     private probeMethod: ProbeMethod = 'delete'; // Default to delete method
+    private minProbeDelayMs: number = 2000;
+    private maxProbeDelayMs: number = 2100;
     public onUpdate?: (data: any) => void;
 
-    constructor(sock: WASocket, targetJid: string, debugMode: boolean = false) {
+    constructor(
+        sock: WASocket,
+        targetJid: string,
+        debugMode: boolean = false,
+        options?: { minProbeDelayMs?: number; maxProbeDelayMs?: number }
+    ) {
         this.sock = sock;
         this.targetJid = targetJid;
         this.trackedJids.add(targetJid);
         trackerLogger.setDebugMode(debugMode);
+
+        if (options?.minProbeDelayMs !== undefined || options?.maxProbeDelayMs !== undefined) {
+            this.setProbeDelayRange(options?.minProbeDelayMs, options?.maxProbeDelayMs);
+        }
     }
 
     public setProbeMethod(method: ProbeMethod) {
@@ -120,6 +131,16 @@ export class WhatsAppTracker {
 
     public getProbeMethod(): ProbeMethod {
         return this.probeMethod;
+    }
+
+    public setProbeDelayRange(minDelayMs?: number, maxDelayMs?: number) {
+        const defaultMin = 2000;
+        const defaultMax = 2100;
+        const resolvedMin = minDelayMs !== undefined ? Math.max(0, Math.floor(minDelayMs)) : defaultMin;
+        const resolvedMax = maxDelayMs !== undefined ? Math.max(0, Math.floor(maxDelayMs)) : defaultMax;
+
+        this.minProbeDelayMs = Math.min(resolvedMin, resolvedMax);
+        this.maxProbeDelayMs = Math.max(resolvedMin, resolvedMax);
     }
 
     /**
@@ -197,7 +218,8 @@ export class WhatsAppTracker {
             } catch (err) {
                 logger.error(err, 'Error sending probe');
             }
-            const delay = Math.floor(Math.random() * 100) + 2000;
+            const delayRange = this.maxProbeDelayMs - this.minProbeDelayMs;
+            const delay = this.minProbeDelayMs + Math.floor(Math.random() * (delayRange + 1));
             await new Promise(resolve => setTimeout(resolve, delay));
         }
     }

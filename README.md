@@ -64,6 +64,80 @@ npm start
 
 Follow prompts to authenticate and enter target number.
 
+CLI probe timing options:
+
+- `--probe-interval-ms <ms>` fixed delay between probes
+- `--probe-min-ms <ms>` and `--probe-max-ms <ms>` random delay range
+
+For multiple WhatsApp targets in CLI, enter comma-separated numbers at the prompt.
+
+You can also pass them upfront:
+
+```bash
+npm start -- --targets 491701234567,491701234568
+```
+
+### Telegraf + InfluxDB2 Export (optional)
+
+This server can emit Influx line protocol metrics to Telegraf, which then forwards
+to InfluxDB2 via the `outputs.influxdb_v2` plugin.
+
+**Environment variables (server/CLI):**
+
+- `TELEGRAF_ENABLED=true`
+- `TELEGRAF_PROTOCOL=udp` or `http` (default: `udp`)
+- `TELEGRAF_HOST=127.0.0.1`
+- `TELEGRAF_PORT=8094` (UDP default) or `8186` (HTTP default)
+- `TELEGRAF_URL=http://localhost:8186/telegraf` (optional, HTTP only)
+- `TELEGRAF_HTTP_PATH=/telegraf` (HTTP only)
+
+**Telegraf config example (`telegraf.conf`):**
+
+```toml
+[agent]
+  interval = "5s"
+
+[[inputs.socket_listener]]
+  service_address = "udp://:8094"
+  data_format = "influx"
+
+[[inputs.http_listener_v2]]
+  service_address = ":8186"
+  path = "/telegraf"
+  data_format = "influx"
+
+[[outputs.influxdb_v2]]
+  urls = ["http://localhost:8086"]
+  token = "YOUR_INFLUXDB_TOKEN"
+  organization = "YOUR_ORG"
+  bucket = "device-activity"
+```
+
+Use either the UDP or HTTP input, matching your `TELEGRAF_PROTOCOL` settings. You can remove
+the unused input block from your `telegraf.conf`.
+
+**Telegraf input examples:**
+
+```toml
+# UDP listener (Influx line protocol)
+[[inputs.socket_listener]]
+  service_address = "udp://:8094"
+  data_format = "influx"
+
+# HTTP listener (Influx line protocol)
+[[inputs.http_listener_v2]]
+  service_address = ":8186"
+  path = "/telegraf"
+  data_format = "influx"
+```
+
+**Measurements emitted:**
+
+- `device_activity` (per device): tags `platform`, `contact_id`, `device_id`, `state`
+  fields `rtt_ms`, `avg_rtt_ms`
+- `device_activity_summary` (per contact): tags `platform`, `contact_id`
+  fields `median_ms`, `threshold_ms`, `device_count`, `presence` (optional)
+
 **Example Output:**
 
 ```
@@ -155,4 +229,3 @@ Built with [@whiskeysockets/baileys](https://github.com/WhiskeySockets/Baileys)
 ---
 
 **Use responsibly. This tool demonstrates real security vulnerabilities that affect millions of users.**
-
