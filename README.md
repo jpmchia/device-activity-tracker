@@ -134,7 +134,7 @@ the unused input block from your `telegraf.conf`.
 **Measurements emitted:**
 
 - `device_activity` (per device): tags `platform`, `contact_id`, `device_id`, `state`
-  fields `rtt_ms`, `avg_rtt_ms`
+  fields `rtt_ms`, `avg_rtt_ms`, `threshold_ms`, `status`
 - `device_activity_summary` (per contact): tags `platform`, `contact_id`
   fields `median_ms`, `threshold_ms`, `device_count`, `presence` (optional)
 

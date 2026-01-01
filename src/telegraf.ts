@@ -47,6 +47,9 @@ class TelegrafReporter {
         if (lines.length === 0) return;
 
         const payload = lines.join('\n');
+        if (this.config.debug) {
+            console.log(`[TELEGRAF] Sending ${lines.length} line(s) via ${this.config.protocol}`);
+        }
 
         if (this.config.protocol === 'http') {
             this.sendHttp(payload);
@@ -57,6 +60,10 @@ class TelegrafReporter {
 
     private sendUdp(payload: string) {
         if (!this.udpSocket) return;
+        if (this.config.debug) {
+            console.log(`[TELEGRAF] UDP -> ${this.config.host}:${this.config.port}`);
+            console.log(payload);
+        }
         this.udpSocket.send(payload, this.config.port, this.config.host, (err) => {
             if (err && this.config.debug) {
                 console.log('[TELEGRAF] UDP send error:', err);
@@ -67,6 +74,10 @@ class TelegrafReporter {
     private async sendHttp(payload: string) {
         const url = this.config.url || `http://${this.config.host}:${this.config.port}${this.config.httpPath}`;
         try {
+            if (this.config.debug) {
+                console.log(`[TELEGRAF] HTTP -> ${url}`);
+                console.log(payload);
+            }
             await fetch(url, {
                 method: 'POST',
                 headers: {
@@ -103,7 +114,9 @@ function buildLineProtocolLines(update: TrackerUpdate): string[] {
 
         const fields = {
             rtt_ms: device.rtt,
-            avg_rtt_ms: device.avg
+            avg_rtt_ms: device.avg,
+            threshold_ms: update.threshold,
+            status: device.state
         };
 
         const line = buildLine('device_activity', tags, fields, timestamp);
